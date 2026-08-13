@@ -1,5 +1,5 @@
 import { BusEvent } from "@/bus/bus-event"
-import { withoutCredentials } from "@/util/credential-env"
+import { childEnv } from "@/util/credential-env"
 import { Bus } from "@/bus"
 import { InstanceState } from "@/effect"
 import { Instance } from "@/project/instance"
@@ -183,11 +183,10 @@ export const layer = Layer.effect(
 
       const cwd = input.cwd || s.dir
       const shell = yield* plugin.trigger("shell.env", { cwd }, { env: {} })
-      // withoutCredentials: a terminal is a shell the user (or agent) types into.
+      // childEnv: a terminal is a shell the user (or agent) types into; `input.env` and the plugin
+      // `shell.env` hook are not ours, so scrub the merged result.
       const env = {
-        ...withoutCredentials(process.env),
-        ...input.env,
-        ...shell.env,
+        ...childEnv(process.env, input.env, shell.env),
         TERM: "xterm-256color",
         MIMOCODE_TERMINAL: "1",
       } as Record<string, string>

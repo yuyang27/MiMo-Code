@@ -1,5 +1,5 @@
 import type * as Arr from "effect/Array"
-import { withoutCredentials } from "@/util/credential-env"
+import { childEnv } from "@/util/credential-env"
 import { NodeFileSystem, NodeSink, NodeStream } from "@effect/platform-node"
 import * as NodePath from "@effect/platform-node/NodePath"
 import * as Deferred from "effect/Deferred"
@@ -105,11 +105,16 @@ export const make = Effect.gen(function* () {
     return path.resolve(opts.cwd)
   })
 
-  // withoutCredentials on the *inherited* half only: every `extendEnv: true` caller funnels
-  // through here, including the agent-controlled shell part in session/prompt.ts. A caller that
-  // passes credentials in `opts.env` on purpose (control-plane workspaces) is left alone.
+  // Every `extendEnv: true` caller funnels through here, including the agent-controlled shell part
+  // in session/prompt.ts. Two things matter:
+  //   - scrub the *merged* result, not just the inherited half: `opts.env` can carry config-derived
+  //     values (formatter settings, plugin `shell.env` hooks) which could otherwise put the
+  //     credentials back (see childEnv);
+  //   - always return an explicit env. Returning `undefined` (the old behavior when a caller passed
+  //     neither `extendEnv` nor `env` — 7 of 20 call sites) makes the child inherit the parent's
+  //     environment wholesale, credentials included.
   const env = (opts: ChildProcess.CommandOptions) =>
-    opts.extendEnv ? { ...withoutCredentials(globalThis.process.env), ...opts.env } : opts.env
+    opts.extendEnv === false && opts.env ? childEnv(opts.env) : childEnv(globalThis.process.env, opts.env)
 
   const input = (x: ChildProcess.CommandInput | undefined): NodeChildProcess.IOType | undefined =>
     Stream.isStream(x) ? "pipe" : x

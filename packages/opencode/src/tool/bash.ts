@@ -1,5 +1,5 @@
 import z from "zod"
-import { withoutCredentials } from "@/util/credential-env"
+import { childEnv } from "@/util/credential-env"
 import os from "os"
 import { createWriteStream, existsSync, readFileSync, realpathSync } from "node:fs"
 import * as Tool from "./tool"
@@ -443,8 +443,7 @@ function cmd(shell: string, name: string, command: string, cwd: string, env: Nod
     })
   }
 
-  const finalCommand =
-    process.platform === "win32" && name === "cmd" ? `${Shell.CMD_UTF8_PREFIX}${command}` : command
+  const finalCommand = process.platform === "win32" && name === "cmd" ? `${Shell.CMD_UTF8_PREFIX}${command}` : command
 
   return ChildProcess.make(finalCommand, [], {
     shell,
@@ -662,20 +661,21 @@ export const BashTool = Tool.define(
       if (identity.email && !process.env["GIT_AUTHOR_EMAIL"]) gitFloor["GIT_AUTHOR_EMAIL"] = identity.email
       if (identity.name && !process.env["GIT_COMMITTER_NAME"]) gitFloor["GIT_COMMITTER_NAME"] = identity.name
       if (identity.email && !process.env["GIT_COMMITTER_EMAIL"]) gitFloor["GIT_COMMITTER_EMAIL"] = identity.email
-      // withoutCredentials: this env goes to agent-authored commands.
-      return {
-        ...withoutCredentials(process.env),
+      // childEnv: this env goes to agent-authored commands, and `extra.env` comes from a plugin hook,
+      // so the credential scrub has to apply to the merged result rather than to process.env alone.
+      return childEnv(
+        process.env,
         // Python ignores the console code page when stdout is a pipe and falls
         // back to the ANSI code page (GBK on zh-CN), producing mojibake. Force
         // UTF-8 for child Python processes on Windows.
-        ...(process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {}),
+        process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {},
         // Git authorship floor. Placed after process.env so the spread order
         // reads naturally, but it can never clobber an operator value: gitFloor
         // only ever holds keys that were absent from process.env. A plugin's
         // extra.env comes last and so can still override the floor.
-        ...gitFloor,
-        ...extra.env,
-      }
+        gitFloor,
+        extra.env,
+      )
     })
 
     const run = Effect.fn("BashTool.run")(function* (
@@ -826,9 +826,7 @@ export const BashTool = Tool.define(
       // only when both flags are on. Same never-worse contract — a shape that
       // doesn't shrink the bytes is discarded.
       const heuristic =
-        !file &&
-        Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY &&
-        Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY_HEURISTIC
+        !file && Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY && Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY_HEURISTIC
           ? BashTokenEfficientHeuristic.cleanHeuristic(cleaned?.text ?? end.text, { command: input.command })
           : null
       if (heuristic && heuristic.bytesOut < heuristic.bytesIn) {
@@ -917,9 +915,7 @@ export const BashTool = Tool.define(
           execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
             Effect.gen(function* () {
               const effectiveCwd = SessionCwd.get(ctx.sessionID)
-              const cwd = params.workdir
-                ? yield* resolvePath(params.workdir, effectiveCwd, shell)
-                : effectiveCwd
+              const cwd = params.workdir ? yield* resolvePath(params.workdir, effectiveCwd, shell) : effectiveCwd
               if (params.timeout !== undefined && params.timeout < 0) {
                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
               }

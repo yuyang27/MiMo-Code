@@ -1,5 +1,5 @@
 import { BusEvent } from "@/bus/bus-event"
-import { withoutCredentials } from "@/util/credential-env"
+import { childEnv } from "@/util/credential-env"
 import { Bus } from "@/bus"
 import { Log } from "../util"
 import * as LSPClient from "./client"
@@ -193,7 +193,7 @@ export const layer = Layer.effect(
                 spawn: async (root) => ({
                   process: lspspawn(item.command[0], item.command.slice(1), {
                     cwd: root,
-                    env: { ...withoutCredentials(process.env), ...item.env },
+                    env: childEnv(process.env, item.env), // item.env 来自 config,故剥合并后的结果
                   }),
                   initialization: item.initialization,
                 }),

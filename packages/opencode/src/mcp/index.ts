@@ -1,5 +1,5 @@
 import { dynamicTool, type Tool, jsonSchema, type JSONSchema7 } from "ai"
-import { withoutCredentials } from "@/util/credential-env"
+import { childEnv } from "@/util/credential-env"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
@@ -440,8 +440,7 @@ export const layer = Layer.effect(
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const auth = yield* McpAuth.Service
     const bus = yield* Bus.Service
-    const createClient = () =>
-      new Client({ name: "mimocode", version: InstallationVersion }, CLIENT_OPTIONS)
+    const createClient = () => new Client({ name: "mimocode", version: InstallationVersion }, CLIENT_OPTIONS)
 
     type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -585,15 +584,12 @@ export const layer = Layer.effect(
         command: cmd,
         args,
         cwd,
-        // withoutCredentials: MCP servers are third-party binaries running as the user.
+        // childEnv: MCP servers are third-party binaries running as the user, and `mcp.environment`
+        // comes from project config — so the merged result is what has to be scrubbed.
         // Note for `opencode` configured as its own MCP server: that nested engine no longer
         // inherits the host's credentials or config content, and falls back to reading auth.json
         // and the config file from disk — which is what a plain CLI invocation does anyway.
-        env: {
-          ...withoutCredentials(process.env),
-          ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
-          ...mcp.environment,
-        },
+        env: childEnv(process.env, cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}, mcp.environment),
       })
       transport.stderr?.on("data", (chunk: Buffer) => {
         log.info(`mcp stderr: ${chunk.toString()}`, { key })

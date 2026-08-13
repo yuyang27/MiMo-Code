@@ -1,65 +1,66 @@
 import { test, expect } from "bun:test"
 import path from "path"
-import { credentialEnvKeys, withoutCredentials } from "../../src/util/credential-env"
+import { childEnv, credentialEnvKeys, withoutCredentials } from "../../src/util/credential-env"
 
 const SRC = path.join(import.meta.dir, "..", "..", "src")
-
-// Bun.Glob yields posix-separated relative paths on every platform, so exemptions are spelled that way.
-const lines = async (file: string) => (await Bun.file(path.join(SRC, file)).text()).split("\n")
 const files = () => [...new Bun.Glob("**/*.ts").scanSync(SRC)]
+const secret = () => Object.fromEntries(credentialEnvKeys().map((key) => [key, "sk-secret"]))
 
-async function scan(pattern: RegExp, skip: Set<string>) {
+async function scan(pattern: RegExp, skip: Set<string>, allow = /childEnv|withoutCredentials/) {
   const hits = await Promise.all(
     files()
       .filter((file) => !skip.has(file))
       .map(async (file) =>
-        (await lines(file)).flatMap((line, index) =>
-          pattern.test(line) && !line.includes("withoutCredentials") ? [`${file}:${index + 1}`] : [],
-        ),
+        (await Bun.file(path.join(SRC, file)).text())
+          .split("\n")
+          .flatMap((line, index) => (pattern.test(line) && !allow.test(line) ? [`${file}:${index + 1}`] : [])),
       ),
   )
   return hits.flat()
 }
 
 test("withoutCredentials drops every credential var and keeps the rest", () => {
-  const secrets = Object.fromEntries(credentialEnvKeys().map((key) => [key, "sk-secret"]))
-  const env = withoutCredentials({ PATH: "/usr/bin", HOME: "/home/user", ...secrets })
-
+  const env = withoutCredentials({ PATH: "/usr/bin", HOME: "/home/user", ...secret() })
   expect(Object.keys(env).sort()).toEqual(["HOME", "PATH"])
   expect(JSON.stringify(env)).not.toContain("sk-secret")
 })
 
-test("withoutCredentials leaves non-credential keys alone", () => {
-  const env = withoutCredentials({ PATH: "/usr/bin", EMPTY: undefined })
-  expect(env.PATH).toBe("/usr/bin")
-  expect("EMPTY" in env).toBe(true)
+// The regression this pins down: scrubbing only the inherited half is not enough. MCP `environment`,
+// LSP `env` and formatter settings come from project config, and config supports `{env:VAR}` — so a
+// checked-out repository could hand the credentials back to a command it controls.
+test("childEnv drops credentials no matter which part they came from", () => {
+  const fromConfig = childEnv({ PATH: "/usr/bin" }, secret())
+  expect(fromConfig.PATH).toBe("/usr/bin")
+  for (const key of credentialEnvKeys()) expect(fromConfig[key]).toBeUndefined()
+
+  // and the same when they are inherited, overridden, or spread across several parts
+  expect(childEnv(secret(), { A: "1" }, secret())["A"]).toBe("1")
+  expect(JSON.stringify(childEnv(secret(), secret()))).not.toContain("sk-secret")
 })
 
-// Every child process must get a scrubbed copy of the inherited environment. Asserting at the call
-// sites (not just on the helper) is the point: the regression this catches is a *new* spawn site
-// handing the environment over untouched, which no behavioral test of the helper would notice.
-//
-// The pattern covers `globalThis.process.env` and `env: process.env`, not just `...process.env` — the
-// spawner funnel every `extendEnv: true` caller goes through is written the first way, and a narrower
-// pattern reports a clean tree while the widest leak path stays open.
-//
-// Known limit: a call that omits `env` entirely inherits by default and matches nothing here. Those
-// spawn either fixed tooling with no attacker-controlled command (taskkill, gh, sqlite3) or go through
-// the wrappers below; a structural rule ("only wrappers may import child_process") would close it and
-// is the natural next step if the list grows.
-test("no spawn site hands the inherited environment over without scrubbing credentials", async () => {
-  // In-process snapshot for the Env service, not an environment handed to a child.
+test("childEnv merges left to right", () => {
+  expect(childEnv({ A: "1", B: "1" }, { B: "2" }, undefined).B).toBe("2")
+})
+
+// Structural guard. The bug this catches is a *new* spawn site building a child's environment by
+// hand — no behavioral test of the helper would notice. Two shapes are forbidden:
+//   - spreading the inherited env (`...process.env`, also written `...globalThis.process.env`);
+//   - handing the inherited env over directly (`env: process.env`).
+// A call that omits `env` entirely inherits by default and matches neither, which is why the spawner
+// funnel now always returns an explicit env instead of `undefined`.
+test("no spawn site builds a child environment without the credential scrub", async () => {
   const offenders = await scan(
     /\.\.\.\s*(?:globalThis\.)?process\.env|env:\s*(?:globalThis\.)?process\.env\b/,
+    // In-process snapshot for the Env service, not an environment handed to a child.
     new Set(["env/index.ts"]),
   )
   expect(offenders).toEqual([])
 })
 
-// `sanitizedProcessEnv` only filters undefined values (it exists to satisfy `Record<string, string>`),
-// so it is a full copy of the environment. That is legitimate for the TUI worker — itself an engine
-// process that needs the credentials — so the function stays; this pins down who else may use it.
-test("sanitizedProcessEnv is only used where the child is an engine process, or scrubbed at the call site", async () => {
+// `sanitizedProcessEnv` only filters undefined values (it exists to satisfy `Record<string, string>`)
+// so it is a full copy of the environment. Legitimate for the TUI worker — itself an engine process
+// that needs the credentials — hence the allowlist rather than a rewrite.
+test("sanitizedProcessEnv is only used for engine processes, or scrubbed at the call site", async () => {
   const unscrubbed = await scan(/sanitizedProcessEnv\(/, new Set(["util/mimo-process.ts", "cli/cmd/tui/thread.ts"]))
   expect(unscrubbed).toEqual([])
 })
